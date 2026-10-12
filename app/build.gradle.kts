@@ -1,5 +1,12 @@
 import java.io.File
+import java.io.FileOutputStream
+import java.math.BigInteger
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.cert.X509Certificate
+import java.sql.Timestamp
 import java.util.Base64
+import java.util.Date
 import java.util.Properties
 
 plugins {
@@ -56,6 +63,45 @@ android {
         return ""
     }
 
+    // Generates a standard Android debug-style keystore (JKS, alias
+    // "androiddebugkey", store/key password "android") using pure JDK APIs.
+    // Used as a guaranteed-to-exist signing fallback on CI runners where no
+    // release keystore and no pre-existing ~/.android/debug.keystore are
+    // available — otherwise :app:validateSigningRelease fails with
+    // "Keystore file ... not found for signing config 'release_config'".
+    fun writeFallbackKeystore(target: File) {
+        val keyPairGenerator = KeyPairGenerator.getInstance("RSA")
+        keyPairGenerator.initialize(2048)
+        val keyPair = keyPairGenerator.generateKeyPair()
+
+        val x500Name = org.bouncycastle.asn1.x500.X500Name("CN=Android Debug,O=Android,C=US")
+        val now = Date()
+        val serial = BigInteger.valueOf(System.currentTimeMillis())
+        val builder = org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(
+            x500Name,                       // issuer (self-signed)
+            serial,
+            Timestamp(now.time - 24L * 60 * 60 * 1000),  // notBefore
+            Timestamp(now.time + 365L * 10 * 24 * 60 * 60 * 1000), // notAfter (~10 years)
+            x500Name,                       // subject
+            keyPair.public
+        )
+        val signer = org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA")
+            .build(keyPair.private)
+        val certHolder = builder.build(signer)
+        val cert: X509Certificate = org.bouncycastle.cert.jcajce.JcaX509CertificateConverter().getCertificate(certHolder)
+
+        val keyStore = KeyStore.getInstance("JKS")
+        keyStore.load(null, null)
+        keyStore.setKeyEntry(
+            "androiddebugkey",
+            keyPair.private,
+            "android".toCharArray(),
+            arrayOf<java.security.cert.Certificate>(cert)
+        )
+        target.parentFile?.mkdirs()
+        FileOutputStream(target).use { keyStore.store(it, "android".toCharArray()) }
+    }
+
     defaultConfig {
         applicationId = "com.lastwave.app"
         minSdk = (project.findProperty("minSdk") as? String)?.toIntOrNull() ?: 29
@@ -96,6 +142,19 @@ android {
             val keyAliasProp = resolveSecret("RELEASE_KEY_ALIAS", "ALIAS").ifBlank { "release_key" }
             val keyPasswordProp = resolveSecret("RELEASE_KEY_PASSWORD", "KEY_PASSWORD").ifBlank { storePasswordProp }
 
+            // A configured store path is only usable if the file actually exists.
+            // On CI/CD runners (e.g. GitHub Actions) RELEASE_STORE_FILE may point at
+            // a machine-local path such as ~/.android/debug.keystore that is absent,
+            // which previously crashed validateSigningRelease with
+            // "Keystore file ... not found for signing config 'release_config'".
+            val resolvedStoreFile: File? = when {
+                storeFilePath.isNotBlank() -> {
+                    val f = file(storeFilePath)
+                    if (f.exists()) f else null
+                }
+                else -> null
+            }
+
             val keystoreFile: File? = when {
                 base64Key.isNotBlank() -> {
                     try {
@@ -105,11 +164,10 @@ android {
                         tempKeystore.writeBytes(decodedBytes)
                         tempKeystore
                     } catch (_: Exception) {
-                        null
+                        resolvedStoreFile
                     }
                 }
-                storeFilePath.isNotBlank() -> file(storeFilePath)
-                else -> null
+                else -> resolvedStoreFile
             }
 
             if (keystoreFile != null && keystoreFile.exists() && storePasswordProp.isNotBlank()) {
@@ -121,7 +179,24 @@ android {
                 enableV2Signing = true
                 enableV3Signing = true
             } else {
-                initWith(getByName("debug"))
+                // No release keystore configured/available (typical on CI runners and
+                // forks). Fall back to a debug-style keystore, but guarantee the file
+                // physically exists before assigning it. The previous code used
+                // initWith(getByName("debug")), which only copies the debug keystore's
+                // *path* — on headless runners ~/.android/debug.keystore is often never
+                // created (no debug build runs first), so :app:validateSigningRelease
+                // failed with "Keystore file '...debug.keystore' not found for signing
+                // config 'release_config'".
+                val fallbackStore = File(layout.buildDirectory.get().asFile, "signing/fallback-debug.keystore")
+                if (!fallbackStore.exists()) {
+                    writeFallbackKeystore(fallbackStore)
+                }
+                storeFile = fallbackStore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+                enableV1Signing = true
+                enableV2Signing = true
             }
         }
     }
