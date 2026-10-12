@@ -171,7 +171,62 @@ data class MiscSettings(
     val canvasFullBleed: Boolean = true,
     /** When true, canvas video loops may be fetched over cellular data. */
     val canvasOverCellular: Boolean = true,
+    /** Master "Performance mode" switch (Settings -> Performance). When on,
+     *  the app automatically dials down GPU-heavy visuals (liquid glass,
+     *  fluid rotating background, wavy seekbar, animated canvas, press/spring
+     *  animations, image crossfades) so it runs smoothly on old devices and
+     *  phones with 4 GB RAM or less. Every individual toggle below keeps
+     *  working; performance mode simply forces the expensive ones off while
+     *  it is enabled — no functionality is removed, only made lighter. */
+    val performanceModeEnabled: Boolean = false,
+    /** Reduce visual effects specifically when Android reports the device as
+     *  a low-RAM device (ActivityManager.isLowRamDevice — Go devices and many
+     *  1-2 GB phones). On by default; turning it off lets such devices keep
+     *  the full visual experience at the risk of stutter/OOM kills. */
+    val autoReduceOnLowRamDevices: Boolean = true,
+    /** Shorten navigation/press animation durations (still animated, just
+     *  snappier) — helps older CPUs/GPUs keep every frame under budget. */
+    val reduceAnimations: Boolean = false,
+    /** Disable Coil's image crossfade transitions. Crossfades double the
+     *  number of bitmaps held during fast scrolling; off = fewer live
+     *  allocations, less GC pressure on 4 GB devices. */
+    val disableImageCrossfade: Boolean = false,
 )
+
+/** Effective visual/performance flags derived from raw settings + device class.
+ *  Single source of truth for UI code: always read these instead of the raw
+ *  toggles so performance mode can transparently override heavy effects while
+ *  all functions themselves remain intact. */
+data class PerformanceProfile(
+    val performanceModeActive: Boolean,
+    val liquidGlassAllowed: Boolean,
+    val rotatingBackgroundEnabled: Boolean,
+    val wavySeekbarEnabled: Boolean,
+    val canvasEnabled: Boolean,
+    val reducedMotion: Boolean,
+    val imageCrossfadeMs: Int,
+) {
+    companion object {
+        fun of(settings: MiscSettings, isLowRamDevice: Boolean): PerformanceProfile {
+            val autoLite = isLowRamDevice && settings.autoReduceOnLowRamDevices
+            // Performance mode OR automatic low-RAM reduction both force the
+            // heavy visuals off; explicit user opt-outs always win too.
+            val lite = settings.performanceModeEnabled || autoLite
+            return PerformanceProfile(
+                performanceModeActive = lite,
+                liquidGlassAllowed = !lite,
+                rotatingBackgroundEnabled = settings.rotatingBackgroundEnabled && !lite,
+                wavySeekbarEnabled = settings.wavySeekbarEnabled && !lite,
+                canvasEnabled = settings.canvasEnabled && !lite,
+                reducedMotion = settings.reduceAnimations || lite,
+                imageCrossfadeMs = when {
+                    settings.disableImageCrossfade || lite -> 0
+                    else -> 300
+                },
+            )
+        }
+    }
+}
 
 /** Toggleable sections of the Home tab (see FeedScreen). Hero greeting and
  *  footer are structural; everything listed here can be hidden by the user.
