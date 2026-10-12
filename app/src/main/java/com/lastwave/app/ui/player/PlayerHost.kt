@@ -916,6 +916,19 @@ private fun ExpandedPlayer(
     val isLiked = currentTrack != null &&
         currentTrack.toGeneratedTrack().key in likedTrackKeys
     val lyricsOffsetMs by viewModel.liveLyricsOffsetMs.collectAsStateWithLifecycle()
+    // Performance profile: single source of truth that transparently dials down
+    // GPU-heavy visuals when Performance mode is on or Android reports a
+    // low-RAM device — every feature below stays functional, just lighter.
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val isLowRamDevice = remember(context) {
+        runCatching {
+            (context.getSystemService(android.content.Context.ACTIVITY_SERVICE)
+                as? android.app.ActivityManager)?.isLowRamDevice == true
+        }.getOrDefault(false)
+    }
+    val perf = remember(settings, isLowRamDevice) {
+        com.lastwave.app.data.local.PerformanceProfile.of(settings, isLowRamDevice)
+    }
     FullPlayer(
         state = state,
         progressState = viewModel.progressState,
@@ -923,14 +936,14 @@ private fun ExpandedPlayer(
         lyricsState = lyricsState,
         lyricsUiVersion = settings.lyricsUiVersion,
         lyricsAnimation = settings.lyricsAnimation,
-        wavySeekbarEnabled = settings.wavySeekbarEnabled,
-        rotatingBackgroundEnabled = settings.rotatingBackgroundEnabled,
+        wavySeekbarEnabled = perf.wavySeekbarEnabled,
+        rotatingBackgroundEnabled = perf.rotatingBackgroundEnabled,
         lyricsOffsetMs = lyricsOffsetMs,
         onSetLyricsOffsetMs = viewModel::setLyricsOffsetMs,
         lyricsFontScale = settings.lyricsFontScale,
         onSetLyricsFontScale = viewModel::setLyricsFontScale,
         canvas = canvas,
-        canvasEnabled = settings.canvasEnabled,
+        canvasEnabled = perf.canvasEnabled,
         canvasFullBleedEnabled = settings.canvasFullBleed,
         currentTab = currentTab,
         onTabChange = onTabChange,
